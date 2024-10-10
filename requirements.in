@@ -1,0 +1,10 @@
+transformers>=4.45.0
+torch
+torchvision
+
+accelerate
+bitsandbytes
+
+fastapi
+pydantic
+uvicorn
