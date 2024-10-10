@@ -1,18 +1,21 @@
-# https://github.com/sam-paech/antislop-sampler @ e931054 || Apache-2.0
-import json
-import os
+# Originally from https://github.com/sam-paech/antislop-sampler @ e931054 || Apache-2.0
+# Modified for Llama 3.2 Vision by Allan Saddi <allan@saddi.com>
 import argparse
-from typing import List, Dict, Union, Optional, Any, AsyncGenerator, Tuple
+import asyncio
+import json
+import queue  # Import queue for thread-safe communication
+import os
+import time
+from typing import List, Dict, Optional, Any, AsyncGenerator
 import urllib
+import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+import logging
 import PIL.Image
 from pydantic import BaseModel, Field
-import uvicorn
-import logging
 import threading
-
 import torch
 from transformers import (
     PreTrainedModel,
@@ -21,12 +24,13 @@ from transformers import (
     AutoProcessor,
     TextIteratorStreamer,
 )
+import uvicorn
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)  # Set to DEBUG for more detailed logs
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="OpenAI-Compatible API")
+app = FastAPI(title="Llama Vision OpenAI-Compatible API")
 
 # Global variables to hold the model and tokenizer
 model: Optional[PreTrainedModel] = None
@@ -38,7 +42,6 @@ model_loaded_time: Optional[int] = None
 model_name_loaded: Optional[str] = None
 
 # Define a global asyncio.Lock to enforce single concurrency
-import asyncio
 lock = asyncio.Lock()
 
 # Define Pydantic models for request and response schemas
@@ -57,7 +60,7 @@ class ChatMessagePartImageUrl(BaseModel):
     image_url: ChatMessageImageUrl
 
 
-# This one is only used internally
+# This one is only used internally, and might be specific to MllamaProcessor?
 class ChatMessagePartImage(BaseModel):
     type: str = 'image'
 
@@ -112,11 +115,6 @@ class ModelsResponse(BaseModel):
 
 # Utility functions
 
-import uuid
-import time
-import queue  # Import queue for thread-safe communication
-
-
 # Startup event to load model and tokenizer
 @app.on_event("startup")
 async def load_model_and_tokenizer():
@@ -150,8 +148,6 @@ async def load_model_and_tokenizer():
     model_name_loaded = model_name
 
 
-# Utility function for streaming responses
-
 def generate_id() -> str:
     return str(uuid.uuid4())
 
@@ -159,6 +155,8 @@ def generate_id() -> str:
 def current_timestamp() -> int:
     return int(time.time())
 
+
+# Utility function for streaming responses
 
 async def stream_tokens_sync(generator: Any, is_chat: bool = False) -> AsyncGenerator[str, None]:
     """
@@ -252,6 +250,10 @@ async def stream_tokens_sync(generator: Any, is_chat: bool = False) -> AsyncGene
 
 
 async def resolve_image_url(url: str, images: list[PIL.Image.Image]) -> None:
+    """
+    Given an URL (which may be a data URL), decode/fetch it and add to the
+    list of images.
+    """
     if url.startswith('data:'):
         # We'll rely on urllib to properly parse it
         with urllib.request.urlopen(url) as resp:
@@ -272,6 +274,12 @@ async def resolve_image_url(url: str, images: list[PIL.Image.Image]) -> None:
 
 
 async def convert_multi_part(parts: list[ChatMessagePartText|ChatMessagePartImageUrl|ChatMessagePartImage], images: list[PIL.Image.Image]) -> None:
+    """
+    Scans each part of a multi-part message and converts parts of
+    type=image_url to type=image as required by MllamaProcessor.
+
+    Decoded/fetched images are appended to the `images` list.
+    """
     for index in range(len(parts)):
         part = parts[index]
         if part.type == 'image_url' and isinstance(part, ChatMessagePartImageUrl):
@@ -292,6 +300,8 @@ async def extract_images(messages: list[ChatCompletionMessage]) -> list[PIL.Imag
 
     `messages` may be modified in-place, as described above.
     """
+    # I believe Llama 3.2 Vision only supports a single image, but we'll
+    # build a list anyway.
     images: list[PIL.Image.Image] = []
     for msg in messages:
         # Only valid for user role
@@ -329,6 +339,8 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
             generator_source = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True) # Why isn't this documented outside of the source?!
             # TODO sampler settings?!
             generator_kwargs = dict(**inputs, max_new_tokens=(2048 if request.max_tokens is None else request.max_tokens), streamer=generator_source)
+            # FIXME Non-streaming version holds lock around entire generate call
+            # I feel like this should do the same...
             gen_thread = threading.Thread(target=model.generate, kwargs=generator_kwargs)
             gen_thread.start()
 
@@ -356,8 +368,10 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
                 # TODO sampler settings???
                 # FIXME Default max_new_tokens should be defined elsewhere
                 output = model.generate(**inputs, max_new_tokens=(2048 if request.max_tokens is None else request.max_tokens))
+                # output tensor includes the prompt, so skip over it
                 prompt_len = inputs.input_ids.shape[-1]
                 generated_ids = output[:, prompt_len:]
+                # it's a batch of 1, just grab the main result
                 generated_tokens = generated_ids[0]
 
             # Decode the tokens
@@ -428,7 +442,7 @@ async def get_models():
 
 # Main function to parse arguments and start Uvicorn
 def main():
-    parser = argparse.ArgumentParser(description="Launch the OpenAI-Compatible API server.")
+    parser = argparse.ArgumentParser(description="Launch the Llama Vision OpenAI-Compatible API server.")
 
     parser.add_argument(
         "--model",
