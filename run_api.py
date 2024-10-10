@@ -6,7 +6,7 @@ import json
 import queue  # Import queue for thread-safe communication
 import os
 import time
-from typing import List, Dict, Optional, Any, AsyncGenerator
+from typing import Generator, List, Dict, Optional, Any, AsyncGenerator
 import urllib
 import uuid
 
@@ -41,8 +41,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_loaded_time: Optional[int] = None
 model_name_loaded: Optional[str] = None
 
-# Define a global asyncio.Lock to enforce single concurrency
-lock = asyncio.Lock()
+# Define a global threading.Lock to enforce single concurrency
+lock = threading.Lock()
 
 # Define Pydantic models for request and response schemas
 
@@ -158,12 +158,12 @@ def current_timestamp() -> int:
 
 # Utility function for streaming responses
 
-async def stream_tokens_sync(generator: Any, is_chat: bool = False) -> AsyncGenerator[str, None]:
+async def stream_tokens_sync(generator: Generator[str, None, None], is_chat: bool = False) -> AsyncGenerator[str, None]:
     """
     Converts a synchronous generator to an asynchronous generator for streaming responses.
     Formats the output to match OpenAI's streaming response format.
     """
-    q = queue.Queue()
+    q: queue.Queue[str] = queue.Queue()
 
     def generator_thread():
         try:
@@ -332,28 +332,31 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
 
         img_list = None if len(images) == 0 else images # MllamaProcessor does not like empty image lists. Use None instead.
         inputs = processor(img_list, prompt, return_tensors='pt').to(model.device)
+        # TODO sampler settings?!
+        # FIXME Default max_new_tokens should be defined elsewhere
+        generate_kwargs = dict(**inputs, max_new_tokens=(2048 if request.max_tokens is None else request.max_tokens))
 
         if request.stream:
             logger.info("Streaming chat completion request started.")
             # Streaming response
+
             generator_source = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True) # Why isn't this documented outside of the source?!
-            # TODO sampler settings?!
-            generator_kwargs = dict(**inputs, max_new_tokens=(2048 if request.max_tokens is None else request.max_tokens), streamer=generator_source)
-            # FIXME Non-streaming version holds lock around entire generate call
-            # I feel like this should do the same...
-            gen_thread = threading.Thread(target=model.generate, kwargs=generator_kwargs)
+
+            def generate_stream():
+                with lock: # Serialize generation
+                    logger.info("Lock acquired for streaming chat completion request.")
+                    model.generate(**generate_kwargs, streamer=generator_source)
+            gen_thread = threading.Thread(target=generate_stream)
             gen_thread.start()
 
             async def streaming_generator():
-                async with lock:
-                    logger.info("Lock acquired for streaming chat completion request.")
-                    try:
-                        async for token in stream_tokens_sync(generator_source, is_chat=True):
-                            yield token
-                    except Exception as e:
-                        logger.error(f"Exception in streaming_generator: {e}")
-                    finally:
-                        logger.info("Streaming generator completed and lock released.")
+                try:
+                    async for token in stream_tokens_sync(generator_source, is_chat=True):
+                        yield token
+                except Exception as e:
+                    logger.error(f"Exception in streaming_generator: {e}")
+                finally:
+                    logger.info("Streaming generator completed.")
 
             return StreamingResponse(
                 streaming_generator(),
@@ -362,17 +365,20 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
 
         else:
             logger.info("Non-streaming chat completion request started.")
-            async with lock:
-                logger.info("Lock acquired for non-streaming chat completion request.")
-                # Non-streaming response
-                # TODO sampler settings???
-                # FIXME Default max_new_tokens should be defined elsewhere
-                output = model.generate(**inputs, max_new_tokens=(2048 if request.max_tokens is None else request.max_tokens))
-                # output tensor includes the prompt, so skip over it
-                prompt_len = inputs.input_ids.shape[-1]
-                generated_ids = output[:, prompt_len:]
-                # it's a batch of 1, just grab the main result
-                generated_tokens = generated_ids[0]
+            # Non-streaming response
+
+            # Push generation to another thread
+            def generate_nonstream():
+                with lock: # NB This is a threading.Lock now, so it blocks
+                    logger.info("Lock acquired for non-streaming chat completion request.")
+                    return model.generate(**generate_kwargs)
+            output = await asyncio.to_thread(generate_nonstream)
+
+            # output tensor includes the prompt, so skip over it
+            prompt_len = inputs.input_ids.shape[-1]
+            generated_ids = output[:, prompt_len:]
+            # it's a batch of 1, just grab the main result
+            generated_tokens = generated_ids[0]
 
             # Decode the tokens
             generated_len = len(generated_tokens)
@@ -384,7 +390,7 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
                 id=generate_id(),
                 object="chat.completion",
                 created=current_timestamp(),
-                model=used_model,
+                model=used_model or 'unknown',
                 choices=[
                     ChatCompletionChoice(
                         message=ChatCompletionMessage(role="assistant", content=text),
