@@ -2,6 +2,7 @@
 # Modified for Llama 3.2 Vision by Allan Saddi <allan@saddi.com>
 import argparse
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import json
 import os
@@ -37,6 +38,9 @@ processor: Optional[PreTrainedTokenizer] = None
 # Variables to store model metadata
 model_loaded_time: Optional[int] = None
 model_name_loaded: Optional[str] = None
+
+# Thread pool for running the model's generate function
+generate_thread_pool: ThreadPoolExecutor|None = None
 
 # Define a global threading.Lock to enforce single concurrency
 lock = threading.Lock()
@@ -114,7 +118,7 @@ class ModelsResponse(BaseModel):
 @asynccontextmanager
 async def setup_teardown(_: FastAPI):
     global processor, model
-    global model_loaded_time, model_name_loaded
+    global model_loaded_time, model_name_loaded, generate_thread_pool
 
     model_name = os.environ['MODEL_NAME'] # FIXME This really comes from the environment??
 
@@ -124,7 +128,7 @@ async def setup_teardown(_: FastAPI):
         processor = AutoProcessor.from_pretrained(model_name)
         logger.info("Tokenizer loaded.")
     except Exception as e:
-        logger.error(f"Error loading tokenizer: {e}")
+        logger.error("Error loading tokenizer:", e)
         raise e
 
     # Load model with appropriate precision
@@ -133,7 +137,7 @@ async def setup_teardown(_: FastAPI):
         model = MllamaForConditionalGeneration.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map='auto')
         logger.info("Model loaded.")
     except Exception as e:
-        logger.error(f"Error loading model: {e}")
+        logger.error("Error loading model:", e)
         raise e  # Let FastAPI handle the startup failure
 
     logger.info("Model and tokenizer loaded successfully.")
@@ -142,11 +146,18 @@ async def setup_teardown(_: FastAPI):
     model_loaded_time = current_timestamp()
     model_name_loaded = model_name
 
+    # Set up thread pool used for generation
+    generate_thread_pool = ThreadPoolExecutor()
+    # Also make it the default, for any future uses of asyncio.to_thread()
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(generate_thread_pool)
+
     try:
         yield
     finally:
-        # No cleanup at the moment
-        pass
+        # Cleanup
+        if generate_thread_pool is not None:
+            generate_thread_pool.shutdown()
 
 
 app = FastAPI(title="Llama Vision OpenAI-Compatible API", lifespan=setup_teardown)
@@ -269,6 +280,7 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
         if model is None or processor is None:
             logger.error("Model and tokenizer are not loaded.")
             raise HTTPException(status_code=500, detail="Model and tokenizer are not loaded.")
+        assert generate_thread_pool is not None
 
         # Use the model specified in the request or default
         used_model = request.model if request.model else model_name_loaded
@@ -295,12 +307,8 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
                 with lock: # Serialize generation
                     logger.info("Lock acquired for streaming chat completion request.")
                     model.generate(**generate_kwargs, streamer=generator_source)
-            # It doesn't feel good creating a thread every time, but I'd
-            # rather not manage a global ThreadPoolExecutor.
-            # Sadly, we don't have access to asyncio's executor (the one used
-            # for .to_thread())
-            gen_thread = threading.Thread(target=generate_stream)
-            gen_thread.start()
+
+            generate_thread_pool.submit(generate_stream)
 
             # AFAIK, if the passed generator is not an AsyncGenerator, it will
             # be iterated in a separate thread automatically.
@@ -354,7 +362,7 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
             return response
 
     except Exception as e:
-        logger.error(f"Error during chat completion processing: {e}")
+        logger.error("Error during chat completion processing:", e)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         logger.debug("Exiting /v1/chat/completions endpoint.")
@@ -386,7 +394,7 @@ async def get_models():
         return response
 
     except Exception as e:
-        logger.error(f"Error during models processing: {e}")
+        logger.error("Error during models processing:", e)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         logger.debug("Exiting /v1/models endpoint.")
