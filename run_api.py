@@ -3,10 +3,9 @@
 import argparse
 import asyncio
 import json
-import queue  # Import queue for thread-safe communication
 import os
 import time
-from typing import Generator, List, Dict, Optional, Any, AsyncGenerator
+from typing import Generator, Iterator, List, Dict, Optional, Any
 import urllib
 import uuid
 
@@ -35,7 +34,6 @@ app = FastAPI(title="Llama Vision OpenAI-Compatible API")
 # Global variables to hold the model and tokenizer
 model: Optional[PreTrainedModel] = None
 processor: Optional[PreTrainedTokenizer] = None
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Variables to store model metadata
 model_loaded_time: Optional[int] = None
@@ -157,96 +155,38 @@ def current_timestamp() -> int:
 
 
 # Utility function for streaming responses
-
-async def stream_tokens_sync(generator: Generator[str, None, None], is_chat: bool = False) -> AsyncGenerator[str, None]:
+def stream_tokens_sse(generator: Iterator[str]) -> Generator[str, None, None]:
     """
-    Converts a synchronous generator to an asynchronous generator for streaming responses.
-    Formats the output to match OpenAI's streaming response format.
+    Converts text stream to SSE data events.
     """
-    q: queue.Queue[str] = queue.Queue()
-
-    def generator_thread():
-        try:
-            logger.debug("Generator thread started.")
-            for token in generator:
-                q.put(token)
-                logger.debug(f"Token put into queue: {token}")
-            q.put(None)  # Signal completion
-            logger.debug("Generator thread completed.")
-        except Exception as e:
-            logger.error(f"Exception in generator_thread: {e}")
-            q.put(e)  # Signal exception
-
-    # Start the generator in a separate daemon thread
-    thread = threading.Thread(target=generator_thread, daemon=True)
-    thread.start()
-    logger.debug("Generator thread initiated.")
-
-    try:
-        while True:
-            token = await asyncio.to_thread(q.get)
-            logger.debug(f"Token retrieved from queue: {token}")
-
-            if token is None:
-                # Send final finish_reason to indicate the end of the stream
-                finish_data = {
-                    "choices": [
-                        {
-                            "delta": {},
-                            "index": 0,
-                            "finish_reason": "stop"
-                        }
-                    ]
+    for text in generator:
+        # Prepare the data in OpenAI's streaming format
+        data = {
+            "choices": [
+                {
+                    "delta": {"content": text},
+                    "index": 0,
+                    "finish_reason": None
                 }
-                yield f"data: {json.dumps(finish_data)}\n\n"
-                logger.debug("Finished streaming tokens.")
-                break
+            ]
+        }
 
-            if isinstance(token, Exception):
-                # Handle exceptions by sending a finish_reason with 'error'
-                error_data = {
-                    "choices": [
-                        {
-                            "delta": {},
-                            "index": 0,
-                            "finish_reason": "error"
-                        }
-                    ]
-                }
-                yield f"data: {json.dumps(error_data)}\n\n"
-                logger.error(f"Exception during token streaming: {token}")
-                break  # Exit the loop after handling the error
+        # Yield the formatted data as a Server-Sent Event (SSE)
+        yield f"data: {json.dumps(data)}\n\n"
+        logger.debug("Yielded token to client.")
 
-            # Since our generator is a TextIteratorStreamer:
-            # 1. The "tokens" we recieve are already decoded
-            # 2. We can tell it to skip over the prompt
-            #
-            # So we can just emit the newly-received token as-is here
-
-            # Prepare the data in OpenAI's streaming format
-            data = {
-                "choices": [
-                    {
-                        "delta": {"content": token},
-                        "index": 0,
-                        "finish_reason": None
-                    }
-                ]
+    # Send final finish_reason to indicate the end of the stream
+    finish_data = {
+        "choices": [
+            {
+                "delta": {},
+                "index": 0,
+                "finish_reason": "stop"
             }
-
-            # Yield the formatted data as a Server-Sent Event (SSE)
-            yield f"data: {json.dumps(data)}\n\n"
-            logger.debug("Yielded token to client.")
-
-            # Yield control back to the event loop
-            await asyncio.sleep(0)
-
-    except asyncio.CancelledError:
-        logger.warning("Streaming task was cancelled by the client.")
-    except Exception as e:
-        logger.error(f"Unexpected error in stream_tokens_sync: {e}")
-    finally:
-        logger.debug("Exiting stream_tokens_sync.")
+        ]
+    }
+    yield f"data: {json.dumps(finish_data)}\n\n"
+    logger.debug("Finished streaming tokens.")
 
 
 async def resolve_image_url(url: str, images: list[PIL.Image.Image]) -> None:
@@ -340,26 +280,24 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
             logger.info("Streaming chat completion request started.")
             # Streaming response
 
-            generator_source = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True) # Why isn't this documented outside of the source?!
+            # Why isn't this documented outside of the source?!
+            generator_source = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
 
             def generate_stream():
                 with lock: # Serialize generation
                     logger.info("Lock acquired for streaming chat completion request.")
                     model.generate(**generate_kwargs, streamer=generator_source)
+            # It doesn't feel good creating a thread every time, but I'd
+            # rather not manage a global ThreadPoolExecutor.
+            # Sadly, we don't have access to asyncio's executor (the one used
+            # for .to_thread())
             gen_thread = threading.Thread(target=generate_stream)
             gen_thread.start()
 
-            async def streaming_generator():
-                try:
-                    async for token in stream_tokens_sync(generator_source, is_chat=True):
-                        yield token
-                except Exception as e:
-                    logger.error(f"Exception in streaming_generator: {e}")
-                finally:
-                    logger.info("Streaming generator completed.")
-
+            # AFAIK, if the passed generator is not an AsyncGenerator, it will
+            # be iterated in a separate thread automatically.
             return StreamingResponse(
-                streaming_generator(),
+                stream_tokens_sse(generator_source),
                 media_type="text/event-stream"
             )
 
