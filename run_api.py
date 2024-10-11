@@ -2,6 +2,7 @@
 # Modified for Llama 3.2 Vision by Allan Saddi <allan@saddi.com>
 import argparse
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import os
 import time
@@ -28,8 +29,6 @@ import uvicorn
 # Set up logging
 logging.basicConfig(level=logging.INFO)  # Set to DEBUG for more detailed logs
 logger = logging.getLogger(__name__)
-
-app = FastAPI(title="Llama Vision OpenAI-Compatible API")
 
 # Global variables to hold the model and tokenizer
 model: Optional[PreTrainedModel] = None
@@ -111,11 +110,9 @@ class ModelsResponse(BaseModel):
     data: List[ModelInfo]
 
 
-# Utility functions
-
 # Startup event to load model and tokenizer
-@app.on_event("startup")
-async def load_model_and_tokenizer():
+@asynccontextmanager
+async def setup_teardown(_: FastAPI):
     global processor, model
     global model_loaded_time, model_name_loaded
 
@@ -145,6 +142,17 @@ async def load_model_and_tokenizer():
     model_loaded_time = current_timestamp()
     model_name_loaded = model_name
 
+    try:
+        yield
+    finally:
+        # No cleanup at the moment
+        pass
+
+
+app = FastAPI(title="Llama Vision OpenAI-Compatible API", lifespan=setup_teardown)
+
+
+# Utility functions
 
 def generate_id() -> str:
     return str(uuid.uuid4())
