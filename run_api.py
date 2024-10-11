@@ -39,6 +39,8 @@ processor: Optional[PreTrainedTokenizer] = None
 model_loaded_time: Optional[int] = None
 model_name_loaded: Optional[str] = None
 
+default_max_tokens = 2048
+
 # Thread pool for running the model's generate function
 generate_thread_pool: ThreadPoolExecutor|None = None
 
@@ -75,7 +77,7 @@ class ChatCompletionRequest(BaseModel):
     model: Optional[str] = Field(default=None, description="Model to use for completion")
     messages: List[ChatCompletionMessage]
     max_tokens: Optional[int] = Field(default=None, ge=1, description="Maximum number of tokens to generate")
-    temperature: Optional[float] = Field(default=1.0, ge=0.0, description="Sampling temperature")
+    temperature: Optional[float] = Field(default=None, ge=0.0, description="Sampling temperature")
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Nucleus sampling probability")
     top_k: Optional[int] = Field(default=None, ge=0, description="Top-K sampling")
     min_p: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Minimum probability threshold")
@@ -118,9 +120,10 @@ class ModelsResponse(BaseModel):
 @asynccontextmanager
 async def setup_teardown(_: FastAPI):
     global processor, model
-    global model_loaded_time, model_name_loaded, generate_thread_pool
+    global model_loaded_time, model_name_loaded, default_max_tokens, generate_thread_pool
 
     model_name = os.environ['MODEL_NAME'] # FIXME This really comes from the environment??
+    default_max_tokens = int(os.environ['MAX_TOKENS'])
 
     # Load tokenizer
     logger.info(f"Loading tokenizer for model '{model_name}'...")
@@ -272,6 +275,15 @@ async def extract_images(messages: list[ChatCompletionMessage]) -> list[PIL.Imag
     return images
 
 
+def get_sampler_settings(request: ChatCompletionRequest) -> dict[str,int|float]:
+    result = {}
+    for k in ('temperature', 'top_k', 'top_p', 'min_p'):
+        value = getattr(request, k, None)
+        if value is not None:
+            result[k] = value
+    return result
+
+
 # Endpoint: /v1/chat/completions
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, req: Request):
@@ -292,9 +304,8 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
 
         img_list = None if len(images) == 0 else images # MllamaProcessor does not like empty image lists. Use None instead.
         inputs = processor(img_list, prompt, return_tensors='pt').to(model.device)
-        # TODO sampler settings?!
-        # FIXME Default max_new_tokens should be defined elsewhere
-        generate_kwargs = dict(**inputs, max_new_tokens=(2048 if request.max_tokens is None else request.max_tokens))
+        generate_kwargs = dict(**inputs, max_new_tokens=(default_max_tokens if request.max_tokens is None else request.max_tokens))
+        generate_kwargs.update(get_sampler_settings(request))
 
         if request.stream:
             logger.info("Streaming chat completion request started.")
@@ -422,11 +433,18 @@ def main():
         default=8000,
         help="Port number to bind the server to."
     )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=default_max_tokens,
+        help="Default maximum number of tokens to generate."
+    )
 
     args = parser.parse_args()
 
     # Set environment variables based on parsed arguments
     os.environ["MODEL_NAME"] = args.model
+    os.environ["MAX_TOKENS"] = str(args.max_tokens)
 
     # Run the app using Uvicorn with single worker and single thread
     uvicorn.run(

@@ -17,7 +17,7 @@ Anyway...
 * [x] `/v1/chat/completions` and `/v1/models` endpoints
 * [x] The chat endpoint supports streaming and non-streaming
 * [x] Messages may contain images, either as a remote URL or [base-64 encoded](https://developer.mozilla.org/en-US/docs/Web/URI/Schemes/data)
-* [ ] Sampler settings
+* [x] Sampler settings
 * [ ] Setting the seed
 
 ## Installation
