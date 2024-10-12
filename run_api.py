@@ -42,6 +42,9 @@ processor: Optional[PreTrainedTokenizer] = None
 model_loaded_time: Optional[int] = None
 model_name_loaded: Optional[str] = None
 
+# Maximum number of tokens to generate
+# Can be overridden by the `--max-tokens` CLI arg
+# Can further be overriden by `max_tokens` request parameter from the client
 default_max_tokens = 2048
 
 # Thread pool for running the model's generate function
@@ -129,7 +132,8 @@ async def setup_teardown(_: FastAPI):
     model_name = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-11B-Vision-Instruct")
     load_in_4bit = os.getenv("LOAD_IN_4BIT", "false").lower() == "true"
     load_in_8bit = os.getenv("LOAD_IN_8BIT", "false").lower() == "true"
-    default_max_tokens = int(os.environ['MAX_TOKENS'])
+    if 'MAX_TOKENS' in os.environ:
+        default_max_tokens = int(os.environ['MAX_TOKENS'])
 
     # Validate mutually exclusive flags
     if load_in_4bit and load_in_8bit:
@@ -158,11 +162,11 @@ async def setup_teardown(_: FastAPI):
                 bnb_4bit_compute_dtype=torch.bfloat16,
             )
         elif load_in_8bit:
-            # Will get warnings about bfloat16 being cast to float16
+            # Will get warnings about bfloat16 being cast to float16 during inference
+            # So set dtype to float16 when loading
             dtype = torch.float16
             quantization_config = BitsAndBytesConfig(
                 load_in_8bit=True,
-                # Apparently, it doesn't like this layer being quantized
                 llm_int8_skip_modules=[
                     'vision_model.patch_embedding',
                     'vision_model.gated_positional_embedding',
@@ -173,6 +177,7 @@ async def setup_teardown(_: FastAPI):
                     'vision_model.post_tile_positional_embedding.embedding',
                     'language_model.model.embed_tokens',
                     'language_model.lm_head',
+                    # Apparently, it doesn't like this layer being quantized
                     'multi_modal_projector'
                     ],
             )
@@ -241,8 +246,8 @@ def stream_tokens_sse(generator: Iterator[str]) -> Generator[str, None, None]:
                     }
                 ]
             }
-            yield f"data: {json.dumps(finish_data)}\n\n"
             logger.debug("Finished streaming tokens.")
+            yield f"data: {json.dumps(finish_data)}\n\n"
             break
         except queue.Empty:
             # This means we timed out
@@ -261,8 +266,8 @@ def stream_tokens_sse(generator: Iterator[str]) -> Generator[str, None, None]:
             }
 
             # Yield the formatted data as a Server-Sent Event (SSE)
-            yield f"data: {json.dumps(data)}\n\n"
             logger.debug("Yielded token to client.")
+            yield f"data: {json.dumps(data)}\n\n"
 
 
 async def resolve_image_url(url: str, images: list[PIL.Image.Image]) -> None:

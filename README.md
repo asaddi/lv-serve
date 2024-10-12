@@ -51,7 +51,7 @@ You can also choose to apply `bitsandbytes` 4-bit/8-bit quantizing as you load t
 
 (Note that `--load_in_8bit` will require around 15GB of VRAM, and for some reason, is significantly slower than 4-bit.)
 
-Do not use `--load_in_4bit` or `--load_in_8bit` when using a pre-quantized model, though at worst, you'll just get an extra warning from the `transformers` library.
+Do not use `--load_in_4bit` or `--load_in_8bit` when already using a pre-quantized model, though at worst, you'll just get an extra warning from the `transformers` library.
 
 ## License
 
