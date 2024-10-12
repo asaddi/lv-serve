@@ -163,7 +163,18 @@ async def setup_teardown(_: FastAPI):
             quantization_config = BitsAndBytesConfig(
                 load_in_8bit=True,
                 # Apparently, it doesn't like this layer being quantized
-                llm_int8_skip_modules=['multi_modal_projector'],
+                llm_int8_skip_modules=[
+                    'vision_model.patch_embedding',
+                    'vision_model.gated_positional_embedding',
+                    'vision_model.gated_positional_embedding.tile_embedding',
+                    'vision_model.pre_tile_positional_embedding',
+                    'vision_model.pre_tile_positional_embedding.embedding',
+                    'vision_model.post_tile_positional_embedding',
+                    'vision_model.post_tile_positional_embedding.embedding',
+                    'language_model.model.embed_tokens',
+                    'language_model.lm_head',
+                    'multi_modal_projector'
+                    ],
             )
 
         model = MllamaForConditionalGeneration.from_pretrained(
