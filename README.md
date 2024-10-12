@@ -38,8 +38,8 @@ Or if you're familiar with [pip-tools](https://github.com/jazzband/pip-tools), y
 
 `model-ID` can be a path to a local model, or the repo-ID of a Llama 3.2 Vision model on Huggingface. For 4-bit quantized, there is currently:
 
-* `SeanScripts/Llama-3.2-11B-Vision-Instruct-nf4`
-* `unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit`
+* `SeanScripts/Llama-3.2-11B-Vision-Instruct-nf4` ([link](https://huggingface.co/SeanScripts/Llama-3.2-11B-Vision-Instruct-nf4))
+* `unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit` ([link](https://huggingface.co/unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit))
 
 They will require approximately 10GB VRAM to run. (I included a sample script to quantize the model, if that's something you'd rather do yourself.)
 
@@ -49,7 +49,7 @@ You can also choose to apply `bitsandbytes` 4-bit/8-bit quantizing as you load t
 
     python run_api.py --model meta-llama/Llama-3.2-11B-Vision-Instruct --load_in_4bit
 
-(Note that I haven't had luck with `--load_in_8bit`. It works with text only, but chokes as soon as an image is involved.)
+(Note that `--load_in_8bit` will require around 15GB of VRAM, and for some reason, is significantly slower than 4-bit.)
 
 Do not use `--load_in_4bit` or `--load_in_8bit` when using a pre-quantized model, though at worst, you'll just get an extra warning from the `transformers` library.
 

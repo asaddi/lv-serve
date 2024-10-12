@@ -148,6 +148,7 @@ async def setup_teardown(_: FastAPI):
     # Load model with appropriate precision
     logger.info(f"Loading model '{model_name}'...")
     try:
+        dtype = torch.bfloat16
         quantization_config = None
         if load_in_4bit:
             quantization_config = BitsAndBytesConfig(
@@ -157,16 +158,20 @@ async def setup_teardown(_: FastAPI):
                 bnb_4bit_compute_dtype=torch.bfloat16,
             )
         elif load_in_8bit:
+            # Will get warnings about bfloat16 being cast to float16
+            dtype = torch.float16
             quantization_config = BitsAndBytesConfig(
                 load_in_8bit=True,
+                # Apparently, it doesn't like this layer being quantized
+                llm_int8_skip_modules=['multi_modal_projector'],
             )
 
         model = MllamaForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             device_map='auto',
             quantization_config=quantization_config
-        )
+        ).eval()
         logger.info("Model loaded.")
     except Exception as e:
         logger.error("Error loading model:", e)
@@ -325,9 +330,10 @@ def get_sampler_settings(request: ChatCompletionRequest) -> dict[str,int|float]:
 def generate_common(inputs: BatchEncoding, generate_kwargs: dict[str,Any], streamer: TextIteratorStreamer|None = None):
     assert model is not None
 
-    start_ns = time.perf_counter_ns()
-    output = model.generate(**generate_kwargs, streamer=streamer)
-    end_ns = time.perf_counter_ns()
+    with torch.no_grad():
+        start_ns = time.perf_counter_ns()
+        output = model.generate(**generate_kwargs, streamer=streamer)
+        end_ns = time.perf_counter_ns()
 
     # output tensor includes the prompt, so skip over it
     prompt_len = inputs.input_ids.shape[-1]
