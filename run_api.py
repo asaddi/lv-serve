@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import json
 import os
+import queue
 import time
 from typing import Generator, Iterator, List, Dict, Optional, Any
 import urllib
@@ -208,34 +209,43 @@ def stream_tokens_sse(generator: Iterator[str]) -> Generator[str, None, None]:
     """
     Converts text stream to SSE data events.
     """
-    for text in generator:
-        # Prepare the data in OpenAI's streaming format
-        data = {
-            "choices": [
-                {
-                    "delta": {"content": text},
-                    "index": 0,
-                    "finish_reason": None
-                }
-            ]
-        }
-
-        # Yield the formatted data as a Server-Sent Event (SSE)
-        yield f"data: {json.dumps(data)}\n\n"
-        logger.debug("Yielded token to client.")
-
-    # Send final finish_reason to indicate the end of the stream
-    finish_data = {
-        "choices": [
-            {
-                "delta": {},
-                "index": 0,
-                "finish_reason": "stop"
+    text_iter = iter(generator)
+    while True:
+        try:
+            text = next(text_iter)
+        except StopIteration:
+            # Send final finish_reason to indicate the end of the stream
+            finish_data = {
+                "choices": [
+                    {
+                        "delta": {},
+                        "index": 0,
+                        "finish_reason": "stop"
+                    }
+                ]
             }
-        ]
-    }
-    yield f"data: {json.dumps(finish_data)}\n\n"
-    logger.debug("Finished streaming tokens.")
+            yield f"data: {json.dumps(finish_data)}\n\n"
+            logger.debug("Finished streaming tokens.")
+            break
+        except queue.Empty:
+            # This means we timed out
+            # Just yield an SSE "comment" to keep the connection alive
+            yield ": I'm still alive...\n\n"
+        else:
+            # Prepare the data in OpenAI's streaming format
+            data = {
+                "choices": [
+                    {
+                        "delta": {"content": text},
+                        "index": 0,
+                        "finish_reason": None
+                    }
+                ]
+            }
+
+            # Yield the formatted data as a Server-Sent Event (SSE)
+            yield f"data: {json.dumps(data)}\n\n"
+            logger.debug("Yielded token to client.")
 
 
 async def resolve_image_url(url: str, images: list[PIL.Image.Image]) -> None:
@@ -339,12 +349,16 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
             # Streaming response
 
             # Why isn't this documented outside of the source?!
-            generator_source = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
+            generator_source = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True, timeout=10)
 
             def generate_stream():
-                with lock: # Serialize generation
-                    logger.info("Lock acquired for streaming chat completion request.")
-                    model.generate(**generate_kwargs, streamer=generator_source)
+                try:
+                    with lock: # Serialize generation
+                        logger.info("Lock acquired for streaming chat completion request.")
+                        model.generate(**generate_kwargs, streamer=generator_source)
+                except Exception as e:
+                    logger.error("Exception during generate", e)
+                    # Just eat it since we're in another thread
 
             generate_thread_pool.submit(generate_stream)
 
@@ -361,9 +375,14 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
 
             # Push generation to another thread
             def generate_nonstream():
-                with lock: # NB This is a threading.Lock now, so it blocks
-                    logger.info("Lock acquired for non-streaming chat completion request.")
-                    return model.generate(**generate_kwargs)
+                try:
+                    with lock: # NB This is a threading.Lock now, so it blocks
+                        logger.info("Lock acquired for non-streaming chat completion request.")
+                        return model.generate(**generate_kwargs)
+                except Exception as e:
+                    logger.error("Exception during generate", e)
+                    # Just eat it since we're in another thread
+
             output = await asyncio.to_thread(generate_nonstream)
 
             # output tensor includes the prompt, so skip over it
