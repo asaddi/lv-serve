@@ -19,10 +19,11 @@ from pydantic import BaseModel, Field
 import threading
 import torch
 from transformers import (
+    AutoProcessor,
+    BitsAndBytesConfig,
+    MllamaForConditionalGeneration,
     PreTrainedModel,
     PreTrainedTokenizer,
-    MllamaForConditionalGeneration,
-    AutoProcessor,
     TextIteratorStreamer,
 )
 import uvicorn
@@ -122,8 +123,16 @@ async def setup_teardown(_: FastAPI):
     global processor, model
     global model_loaded_time, model_name_loaded, default_max_tokens, generate_thread_pool
 
-    model_name = os.environ['MODEL_NAME'] # FIXME This really comes from the environment??
+    # Load configuration from environment variables
+    model_name = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-11B-Vision-Instruct")
+    load_in_4bit = os.getenv("LOAD_IN_4BIT", "false").lower() == "true"
+    load_in_8bit = os.getenv("LOAD_IN_8BIT", "false").lower() == "true"
     default_max_tokens = int(os.environ['MAX_TOKENS'])
+
+    # Validate mutually exclusive flags
+    if load_in_4bit and load_in_8bit:
+        logger.error("Cannot set both LOAD_IN_4BIT and LOAD_IN_8BIT. Choose one.")
+        raise ValueError("Cannot set both LOAD_IN_4BIT and LOAD_IN_8BIT. Choose one.")
 
     # Load tokenizer
     logger.info(f"Loading tokenizer for model '{model_name}'...")
@@ -137,7 +146,25 @@ async def setup_teardown(_: FastAPI):
     # Load model with appropriate precision
     logger.info(f"Loading model '{model_name}'...")
     try:
-        model = MllamaForConditionalGeneration.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map='auto')
+        quantization_config = None
+        if load_in_4bit:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=False,
+                bnb_4bit_quant_type='nf4',
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+        elif load_in_8bit:
+            quantization_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+            )
+
+        model = MllamaForConditionalGeneration.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,
+            device_map='auto',
+            quantization_config=quantization_config
+        )
         logger.info("Model loaded.")
     except Exception as e:
         logger.error("Error loading model:", e)
@@ -422,6 +449,16 @@ def main():
         help="Path to the model directory or HuggingFace model ID (e.g., 'gpt2')."
     )
     parser.add_argument(
+        "--load_in_4bit",
+        action="store_true",
+        help="Load the model in 4-bit precision (requires appropriate support)."
+    )
+    parser.add_argument(
+        "--load_in_8bit",
+        action="store_true",
+        help="Load the model in 8-bit precision (requires appropriate support)."
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -444,6 +481,8 @@ def main():
 
     # Set environment variables based on parsed arguments
     os.environ["MODEL_NAME"] = args.model
+    os.environ["LOAD_IN_4BIT"] = str(args.load_in_4bit)
+    os.environ["LOAD_IN_8BIT"] = str(args.load_in_8bit)
     os.environ["MAX_TOKENS"] = str(args.max_tokens)
 
     # Run the app using Uvicorn with single worker and single thread

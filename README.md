@@ -45,6 +45,14 @@ They will require approximately 10GB VRAM to run. (I included a sample script to
 
 By default, the server will listen on all interfaces on port 8000, but this can be changed with the `--host` and `--port` options.
 
+You can also choose to apply `bitsandbytes` 4-bit/8-bit quantizing as you load the original model. Simply add the `--load_in_4bit` or `--load_in_8bit` options:
+
+    python run_api.py --model meta-llama/Llama-3.2-11B-Vision-Instruct --load_in_4bit
+
+(Note that I haven't had luck with `--load_in_8bit`. It works with text only, but chokes as soon as an image is involved.)
+
+Do not use `--load_in_4bit` or `--load_in_8bit` when using a pre-quantized model, though at worst, you'll just get an extra warning from the `transformers` library.
+
 ## License
 
 Licensed under [Apache-2.0](https://opensource.org/license/apache-2-0).
