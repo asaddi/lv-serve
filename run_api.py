@@ -21,6 +21,7 @@ import threading
 import torch
 from transformers import (
     AutoProcessor,
+    BatchEncoding,
     BitsAndBytesConfig,
     MllamaForConditionalGeneration,
     PreTrainedModel,
@@ -321,6 +322,28 @@ def get_sampler_settings(request: ChatCompletionRequest) -> dict[str,int|float]:
     return result
 
 
+def generate_common(inputs: BatchEncoding, generate_kwargs: dict[str,Any], streamer: TextIteratorStreamer|None = None):
+    assert model is not None
+
+    start_ns = time.perf_counter_ns()
+    output = model.generate(**generate_kwargs, streamer=streamer)
+    end_ns = time.perf_counter_ns()
+
+    # output tensor includes the prompt, so skip over it
+    prompt_len = inputs.input_ids.shape[-1]
+    generated_ids = output[:, prompt_len:]
+    # it's a batch of 1, just grab the main result
+    generated_tokens = generated_ids[0]
+
+    gen_time = (end_ns - start_ns) / 1e9
+    gen_len = generated_tokens.shape[-1]
+
+    logger.info(f"Generation done. Prompt length = {prompt_len} tokens, generated token count = {gen_len}, total generation time = {gen_time:.2f} s")
+    logger.info(f"Average (prompt processing + generation) speed: {(prompt_len+gen_len) / gen_time:.1f} t/s")
+
+    return generated_tokens
+
+
 # Endpoint: /v1/chat/completions
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, req: Request):
@@ -341,6 +364,8 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
 
         img_list = None if len(images) == 0 else images # MllamaProcessor does not like empty image lists. Use None instead.
         inputs = processor(img_list, prompt, return_tensors='pt').to(model.device)
+        prompt_len = inputs.input_ids.shape[-1]
+
         generate_kwargs = dict(**inputs, max_new_tokens=(default_max_tokens if request.max_tokens is None else request.max_tokens))
         generate_kwargs.update(get_sampler_settings(request))
 
@@ -355,7 +380,7 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
                 try:
                     with lock: # Serialize generation
                         logger.info("Lock acquired for streaming chat completion request.")
-                        model.generate(**generate_kwargs, streamer=generator_source)
+                        generate_common(inputs, generate_kwargs, streamer=generator_source)
                 except Exception as e:
                     logger.error("Exception during generate", e)
                     # Just eat it since we're in another thread
@@ -378,18 +403,12 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
                 try:
                     with lock: # NB This is a threading.Lock now, so it blocks
                         logger.info("Lock acquired for non-streaming chat completion request.")
-                        return model.generate(**generate_kwargs)
+                        return generate_common(inputs, generate_kwargs)
                 except Exception as e:
                     logger.error("Exception during generate", e)
                     # Just eat it since we're in another thread
 
-            output = await asyncio.to_thread(generate_nonstream)
-
-            # output tensor includes the prompt, so skip over it
-            prompt_len = inputs.input_ids.shape[-1]
-            generated_ids = output[:, prompt_len:]
-            # it's a batch of 1, just grab the main result
-            generated_tokens = generated_ids[0]
+            generated_tokens = await asyncio.to_thread(generate_nonstream)
 
             # Decode the tokens
             generated_len = len(generated_tokens)
