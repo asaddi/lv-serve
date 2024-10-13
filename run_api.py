@@ -28,6 +28,7 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
     TextIteratorStreamer,
+    set_seed,
 )
 import uvicorn
 
@@ -88,6 +89,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Nucleus sampling probability")
     top_k: Optional[int] = Field(default=None, ge=0, description="Top-K sampling")
     min_p: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Minimum probability threshold")
+    seed: Optional[int] = Field(default=None, ge=-0x8000_0000_0000_0000, le=0x7fff_ffff_ffff_ffff, description="Seed for random number generators")
     stream: Optional[bool] = Field(default=False, description="Whether to stream back partial progress")
 
 
@@ -354,11 +356,14 @@ def get_sampler_settings(request: ChatCompletionRequest) -> dict[str,int|float]:
     return result
 
 
-def generate_common(inputs: BatchEncoding, generate_kwargs: dict[str,Any], streamer: TextIteratorStreamer|None = None):
+def generate_common(inputs: BatchEncoding, generate_kwargs: dict[str,Any], seed: int|None=None, streamer: TextIteratorStreamer|None = None):
     assert model is not None
 
     with torch.no_grad():
         start_ns = time.perf_counter_ns()
+        if seed is not None:
+            # Constrain to 32-bits because of numpy
+            set_seed(seed & 0xffff_ffff)
         output = model.generate(**generate_kwargs, streamer=streamer)
         end_ns = time.perf_counter_ns()
 
@@ -413,7 +418,7 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
                 try:
                     with lock: # Serialize generation
                         logger.info("Lock acquired for streaming chat completion request.")
-                        generate_common(inputs, generate_kwargs, streamer=generator_source)
+                        generate_common(inputs, generate_kwargs, seed=request.seed, streamer=generator_source)
                 except Exception as e:
                     logger.error("Exception during generate", e)
                     # Just eat it since we're in another thread
@@ -436,7 +441,7 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
                 try:
                     with lock: # NB This is a threading.Lock now, so it blocks
                         logger.info("Lock acquired for non-streaming chat completion request.")
-                        return generate_common(inputs, generate_kwargs)
+                        return generate_common(inputs, generate_kwargs, seed=request.seed)
                 except Exception as e:
                     logger.error("Exception during generate", e)
                     # Just eat it since we're in another thread

@@ -18,7 +18,7 @@ Anyway...
 * [x] The chat endpoint supports streaming and non-streaming
 * [x] Messages may contain images, either as a remote URL or [base-64 encoded](https://developer.mozilla.org/en-US/docs/Web/URI/Schemes/data)
 * [x] Sampler settings
-* [ ] Setting the seed
+* [x] Setting the seed
 
 ## Installation
 
