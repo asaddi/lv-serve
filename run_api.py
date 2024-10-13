@@ -23,6 +23,7 @@ from transformers import (
     AutoProcessor,
     BatchEncoding,
     BitsAndBytesConfig,
+    MllamaConfig,
     MllamaForConditionalGeneration,
     PreTrainedModel,
     PreTrainedTokenizer,
@@ -152,9 +153,17 @@ async def setup_teardown(_: FastAPI):
     # Load model with appropriate precision
     logger.info(f"Loading model '{model_name}'...")
     try:
-        dtype = torch.bfloat16
+        # Peek at the model's configuration
+        config = MllamaConfig.from_pretrained(model_name)
+
+        # And use its preferred dtype
+        dtype = config.torch_dtype
+        if dtype is None:
+            dtype = torch.bfloat16 # Since the original model was in bfloat16
+
         quantization_config = None
         if load_in_4bit:
+            dtype = torch.bfloat16
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=False,
@@ -181,6 +190,8 @@ async def setup_teardown(_: FastAPI):
                     'multi_modal_projector'
                     ],
             )
+
+        logger.info(f"Using dtype = {dtype} for model")
 
         model = MllamaForConditionalGeneration.from_pretrained(
             model_name,
