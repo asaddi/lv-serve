@@ -23,6 +23,7 @@ from transformers import (
     AutoProcessor,
     BatchEncoding,
     BitsAndBytesConfig,
+    HqqConfig,
     MllamaConfig,
     MllamaForConditionalGeneration,
     PreTrainedModel,
@@ -135,11 +136,12 @@ async def setup_teardown(_: FastAPI):
     model_name = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-11B-Vision-Instruct")
     load_in_4bit = os.getenv("LOAD_IN_4BIT", "false").lower() == "true"
     load_in_8bit = os.getenv("LOAD_IN_8BIT", "false").lower() == "true"
+    hqq_8bit = os.getenv("HQQ_8BIT", "false").lower() == "true"
     if 'MAX_TOKENS' in os.environ:
         default_max_tokens = int(os.environ['MAX_TOKENS'])
 
     # Validate mutually exclusive flags
-    if load_in_4bit and load_in_8bit:
+    if load_in_4bit and load_in_8bit: # TODO Check for HQQ as well?
         logger.error("Cannot set both LOAD_IN_4BIT and LOAD_IN_8BIT. Choose one.")
         raise ValueError("Cannot set both LOAD_IN_4BIT and LOAD_IN_8BIT. Choose one.")
 
@@ -192,13 +194,21 @@ async def setup_teardown(_: FastAPI):
                     'multi_modal_projector'
                     ],
             )
+        elif hqq_8bit:
+            dtype = torch.bfloat16
+            quantization_config = HqqConfig(
+                nbits=8,
+                group_size=64,
+            )
 
         logger.info(f"Using dtype = {dtype} for model")
 
         model = MllamaForConditionalGeneration.from_pretrained(
             model_name,
             torch_dtype=dtype,
-            device_map='auto',
+            # Need to force it on cuda because apparently the entire model
+            # is loaded into VRAM first and then quantized (HQQ)
+            device_map=('cuda' if hqq_8bit else 'auto'),
             quantization_config=quantization_config
         ).eval()
         logger.info("Model loaded.")
@@ -535,6 +545,11 @@ def main():
         help="Load the model in 8-bit precision (requires appropriate support)."
     )
     parser.add_argument(
+        "--hqq_8bit",
+        action="store_true",
+        help="Load the model in 8-bit precision (requires appropriate support)."
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -559,6 +574,7 @@ def main():
     os.environ["MODEL_NAME"] = args.model
     os.environ["LOAD_IN_4BIT"] = str(args.load_in_4bit)
     os.environ["LOAD_IN_8BIT"] = str(args.load_in_8bit)
+    os.environ["HQQ_8BIT"] = str(args.hqq_8bit)
     os.environ["MAX_TOKENS"] = str(args.max_tokens)
 
     # Run the app using Uvicorn with single worker and single thread
