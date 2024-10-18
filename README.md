@@ -19,6 +19,7 @@ Anyway...
 * [x] Messages may contain images, either as a remote URL or [base-64 encoded](https://developer.mozilla.org/en-US/docs/Web/URI/Schemes/data)
 * [x] Sampler settings
 * [x] Setting the seed
+* [x] Yes, this project works (and was primarily developed on) Windows-native Python. No WSL or Docker needed.
 
 ## Installation
 
@@ -52,6 +53,11 @@ You can also choose to apply `bitsandbytes` 4-bit/8-bit quantizing as you load t
 (Note that `--load_in_8bit` will require around 15GB of VRAM, and for some reason, is significantly slower than 4-bit.)
 
 Do not use `--load_in_4bit` or `--load_in_8bit` when already using a pre-quantized model, though at worst, you'll just get an extra warning from the `transformers` library.
+
+## My Related Projects ##
+
+* https://github.com/asaddi/ComfyUI-YALLM-node LLM ComfyUI nodes for local & remote LLMs served via OpenAI-like API. Multimodal support too, so you can talk to this server.
+* https://github.com/asaddi/YALLM-LlamaVision Another ComfyUI node for Llama 3.2 Vision. Though these days, I prefer hosting models outside of ComfyUI, i.e. using lv-serve & ComfyUI-YALLM-node instead.
 
 ## License
 
