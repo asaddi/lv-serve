@@ -15,6 +15,7 @@ import uuid
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import logging
+from optimum.quanto import QuantizedTransformersModel
 import PIL.Image
 from pydantic import BaseModel, Field
 import threading
@@ -127,6 +128,15 @@ class ModelsResponse(BaseModel):
     data: List[ModelInfo]
 
 
+# Of course, it's not just a CausalLM, so QuantizedModelForCausalLM doesn't
+# work for it.
+class QuantizedMllamaForConditionalGeneration(QuantizedTransformersModel):
+    auto_class = MllamaForConditionalGeneration
+
+# Strangely, MllamaForConditionalGeneration doesn't have from_config?
+# Just monkey-patch it, I guess
+MllamaForConditionalGeneration.from_config = MllamaForConditionalGeneration._from_config
+
 # Startup event to load model and tokenizer
 @asynccontextmanager
 async def setup_teardown(_: FastAPI):
@@ -137,11 +147,12 @@ async def setup_teardown(_: FastAPI):
     model_name = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-11B-Vision-Instruct")
     load_in_4bit = os.getenv("LOAD_IN_4BIT", "false").lower() == "true"
     load_in_8bit = os.getenv("LOAD_IN_8BIT", "false").lower() == "true"
+    quanto_8bit = os.getenv("QUANTO_8BIT", "false").lower() == "true"
     if 'MAX_TOKENS' in os.environ:
         default_max_tokens = int(os.environ['MAX_TOKENS'])
 
     # Validate mutually exclusive flags
-    if load_in_4bit and load_in_8bit:
+    if load_in_4bit and load_in_8bit: # TODO check quanto_8bit
         logger.error("Cannot set both LOAD_IN_4BIT and LOAD_IN_8BIT. Choose one.")
         raise ValueError("Cannot set both LOAD_IN_4BIT and LOAD_IN_8BIT. Choose one.")
 
@@ -165,44 +176,19 @@ async def setup_teardown(_: FastAPI):
         if dtype is None:
             dtype = torch.bfloat16 # Since the original model was in bfloat16
 
-        quantization_config = None
-        if load_in_4bit:
-            dtype = torch.bfloat16
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=False,
-                bnb_4bit_quant_type='nf4',
-                bnb_4bit_compute_dtype=torch.bfloat16,
-            )
-        elif load_in_8bit:
-            # Will get warnings about bfloat16 being cast to float16 during inference
-            # So set dtype to float16 when loading
-            dtype = torch.float16
-            quantization_config = BitsAndBytesConfig(
-                load_in_8bit=True,
-                llm_int8_skip_modules=[
-                    'vision_model.patch_embedding',
-                    'vision_model.gated_positional_embedding',
-                    'vision_model.gated_positional_embedding.tile_embedding',
-                    'vision_model.pre_tile_positional_embedding',
-                    'vision_model.pre_tile_positional_embedding.embedding',
-                    'vision_model.post_tile_positional_embedding',
-                    'vision_model.post_tile_positional_embedding.embedding',
-                    'language_model.model.embed_tokens',
-                    'language_model.lm_head',
-                    # Apparently, it doesn't like this layer being quantized
-                    'multi_modal_projector'
-                    ],
-            )
+        if quanto_8bit:
+            model = QuantizedMllamaForConditionalGeneration.from_pretrained(model_name).to(torch.device('cuda'))
+        else:
+            dtype, quantization_config = bnb_quantize(dtype, load_in_4bit, load_in_8bit)
 
-        logger.info(f"Using dtype = {dtype} for model")
+            logger.info(f"Using dtype = {dtype} for model")
 
-        model = MllamaForConditionalGeneration.from_pretrained(
-            model_name,
-            torch_dtype=dtype,
-            device_map='auto',
-            quantization_config=quantization_config
-        ).eval()
+            model = MllamaForConditionalGeneration.from_pretrained(
+                model_name,
+                torch_dtype=dtype,
+                device_map='auto',
+                quantization_config=quantization_config
+            ).eval()
         logger.info("Model loaded.")
     except Exception as e:
         logger.error("Error loading model:", e)
@@ -226,6 +212,40 @@ async def setup_teardown(_: FastAPI):
         # Cleanup
         if generate_thread_pool is not None:
             generate_thread_pool.shutdown()
+
+
+def bnb_quantize(dtype, load_in_4bit, load_in_8bit):
+    quantization_config = None
+    if load_in_4bit:
+        dtype = torch.bfloat16
+        quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=False,
+                bnb_4bit_quant_type='nf4',
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+    elif load_in_8bit:
+            # Will get warnings about bfloat16 being cast to float16 during inference
+            # So set dtype to float16 when loading
+        dtype = torch.float16
+        quantization_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_skip_modules=[
+                    'vision_model.patch_embedding',
+                    'vision_model.gated_positional_embedding',
+                    'vision_model.gated_positional_embedding.tile_embedding',
+                    'vision_model.pre_tile_positional_embedding',
+                    'vision_model.pre_tile_positional_embedding.embedding',
+                    'vision_model.post_tile_positional_embedding',
+                    'vision_model.post_tile_positional_embedding.embedding',
+                    'language_model.model.embed_tokens',
+                    'language_model.lm_head',
+                    # Apparently, it doesn't like this layer being quantized
+                    'multi_modal_projector'
+                    ],
+            )
+
+    return dtype,quantization_config
 
 
 app = FastAPI(title="Llama Vision OpenAI-Compatible API", lifespan=setup_teardown)
@@ -583,6 +603,11 @@ def main():
         help="Load the model in 8-bit precision (requires appropriate support)."
     )
     parser.add_argument(
+        "--quanto-int8",
+        action="store_true",
+        help="Load the model in Quanto 8-bit precision (requires appropriate support)."
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -607,6 +632,7 @@ def main():
     os.environ["MODEL_NAME"] = args.model
     os.environ["LOAD_IN_4BIT"] = str(args.load_in_4bit)
     os.environ["LOAD_IN_8BIT"] = str(args.load_in_8bit)
+    os.environ["QUANTO_8BIT"] = str(args.quanto_int8)
     os.environ["MAX_TOKENS"] = str(args.max_tokens)
 
     # Run the app using Uvicorn with single worker and single thread
