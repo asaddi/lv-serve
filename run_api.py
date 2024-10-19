@@ -152,9 +152,12 @@ async def setup_teardown(_: FastAPI):
         default_max_tokens = int(os.environ['MAX_TOKENS'])
 
     # Validate mutually exclusive flags
-    if load_in_4bit and load_in_8bit: # TODO check quanto_8bit
-        logger.error("Cannot set both LOAD_IN_4BIT and LOAD_IN_8BIT. Choose one.")
-        raise ValueError("Cannot set both LOAD_IN_4BIT and LOAD_IN_8BIT. Choose one.")
+    quant_flags = [load_in_4bit, load_in_8bit, quanto_8bit]
+    if sum(quant_flags) > 1:
+        # NB It doesn't help to check this in ArgumentParser, since the env
+        # vars can be set independently.
+        logger.error("Cannot set more than one LOAD_IN_4BIT/LOAD_IN_8BIT/QUANTO_8BIT. Choose one.")
+        raise ValueError("Cannot set more than one LOAD_IN_4BIT/LOAD_IN_8BIT/QUANTO_8BIT. Choose one.")
 
     # Load tokenizer
     logger.info(f"Loading tokenizer for model '{model_name}'...")
@@ -177,6 +180,11 @@ async def setup_teardown(_: FastAPI):
             dtype = torch.bfloat16 # Since the original model was in bfloat16
 
         if quanto_8bit:
+            # Some notes:
+            # device= and device_map= don't seem to work here.
+            # Using context manager `with torch.device('cuda'):` will load
+            # it into CUDA device, but without .to(), it will still
+            # execute on the CPU(!!!). Doing both usually results in a crash.
             model = QuantizedMllamaForConditionalGeneration.from_pretrained(model_name).to(torch.device('cuda'))
         else:
             dtype, quantization_config = bnb_quantize(dtype, load_in_4bit, load_in_8bit)
