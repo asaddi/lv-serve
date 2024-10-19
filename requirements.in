@@ -4,6 +4,7 @@ torchvision
 
 accelerate
 bitsandbytes
+optimum-quanto
 
 fastapi
 pydantic
