@@ -8,7 +8,7 @@ import json
 import os
 import queue
 import time
-from typing import Generator, Iterator, List, Dict, Optional, Any
+from typing import AsyncGenerator, Generator, Iterator, List, Dict, Optional, Any
 import urllib
 import uuid
 
@@ -27,6 +27,8 @@ from transformers import (
     MllamaForConditionalGeneration,
     PreTrainedModel,
     PreTrainedTokenizer,
+    StoppingCriteria,
+    StoppingCriteriaList,
     TextIteratorStreamer,
     set_seed,
 )
@@ -240,15 +242,40 @@ def current_timestamp() -> int:
 
 
 # Utility function for streaming responses
-def stream_tokens_sse(generator: Iterator[str]) -> Generator[str, None, None]:
-    """
-    Converts text stream to SSE data events.
-    """
-    text_iter = iter(generator)
+async def stream_tokens_sse(generator: Iterator[str], cancel_event: threading.Event) -> AsyncGenerator[str, None]:
+    q: queue.Queue[str|queue.Empty|None] = queue.Queue()
+
+    def stream_tokens_sse_sync(generator: Iterator[str]):
+        text_iter = iter(generator)
+        while not cancel_event.is_set():
+            try:
+                text = next(text_iter)
+            except StopIteration:
+                # Signal done
+                q.put(None)
+                break
+            except queue.Empty:
+                # Timed out
+                q.put(queue.Empty())
+            except Exception as e:
+                logger.error(f'Exception in stream_tokens_sse_sync:', e)
+                # Just eat the exception since we're in another thread
+                break # And get out
+            else:
+                q.put(text)
+    thread = threading.Thread(target=stream_tokens_sse_sync, daemon=True, args=(generator,))
+    thread.start()
+
     while True:
         try:
-            text = next(text_iter)
-        except StopIteration:
+            text = await asyncio.to_thread(q.get)
+        except asyncio.CancelledError:
+            logger.info(f'Streaming cancelled...')
+            # Signal stream_tokens_sse_sync and generator thread
+            cancel_event.set()
+            break
+
+        if text is None:
             # Send final finish_reason to indicate the end of the stream
             finish_data = {
                 "choices": [
@@ -262,10 +289,12 @@ def stream_tokens_sse(generator: Iterator[str]) -> Generator[str, None, None]:
             logger.debug("Finished streaming tokens.")
             yield f"data: {json.dumps(finish_data)}\n\n"
             break
-        except queue.Empty:
+
+        elif isinstance(text, queue.Empty):
             # This means we timed out
             # Just yield an SSE "comment" to keep the connection alive
             yield ": I'm still alive...\n\n"
+
         else:
             # Prepare the data in OpenAI's streaming format
             data = {
@@ -382,6 +411,18 @@ def generate_common(inputs: BatchEncoding, generate_kwargs: dict[str,Any], seed:
     return generated_tokens
 
 
+class CancelledStoppingCriteria(StoppingCriteria):
+    """
+    StoppingCriteria that is True when the event's flag has been set.
+    """
+    def __init__(self, event: threading.Event):
+        self._event = event
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
+        is_cancelled = self._event.is_set()
+        return torch.full((input_ids.shape[0],), is_cancelled, device=input_ids.device, dtype=torch.bool)
+
+
 # Endpoint: /v1/chat/completions
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, req: Request):
@@ -413,6 +454,13 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
 
             # Why isn't this documented outside of the source?!
             generator_source = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True, timeout=10)
+            # Should the returned StreamingResponse get cancelled (because
+            # the client closed connection, for example), propagate the
+            # cancellation request via this Event.
+            cancel_event = threading.Event()
+
+            # Add our cancel Event as an additional stopping criteria for generation
+            generate_kwargs['stopping_criteria'] = StoppingCriteriaList([CancelledStoppingCriteria(cancel_event)])
 
             def generate_stream():
                 try:
@@ -428,7 +476,7 @@ async def chat_completions(request: ChatCompletionRequest, req: Request):
             # AFAIK, if the passed generator is not an AsyncGenerator, it will
             # be iterated in a separate thread automatically.
             return StreamingResponse(
-                stream_tokens_sse(generator_source),
+                stream_tokens_sse(generator_source, cancel_event),
                 media_type="text/event-stream"
             )
 
