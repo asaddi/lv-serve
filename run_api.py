@@ -24,6 +24,7 @@ from transformers import (
     AutoProcessor,
     BatchEncoding,
     BitsAndBytesConfig,
+    GenerationConfig,
     MllamaConfig,
     MllamaForConditionalGeneration,
     PreTrainedModel,
@@ -46,6 +47,8 @@ processor: Optional[PreTrainedTokenizer] = None
 # Variables to store model metadata
 model_loaded_time: Optional[int] = None
 model_name_loaded: Optional[str] = None
+
+generation_config: Optional[GenerationConfig] = None
 
 # Maximum number of tokens to generate
 # Can be overridden by the `--max-tokens` CLI arg
@@ -141,7 +144,7 @@ MllamaForConditionalGeneration.from_config = MllamaForConditionalGeneration._fro
 @asynccontextmanager
 async def setup_teardown(_: FastAPI):
     global processor, model
-    global model_loaded_time, model_name_loaded, default_max_tokens, generate_thread_pool
+    global model_loaded_time, model_name_loaded, default_max_tokens, generate_thread_pool, generation_config
 
     # Load configuration from environment variables
     model_name = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-11B-Vision-Instruct")
@@ -186,6 +189,8 @@ async def setup_teardown(_: FastAPI):
             # it into CUDA device, but without .to(), it will still
             # execute on the CPU(!!!). Doing both usually results in a crash.
             model = QuantizedMllamaForConditionalGeneration.from_pretrained(model_name).to(torch.device('cuda'))
+            # This doesn't get picked up automatically anymore? What a mess. TODO
+            generation_config = GenerationConfig.from_pretrained(model_name)
         else:
             dtype, quantization_config = bnb_quantize(dtype, load_in_4bit, load_in_8bit)
 
@@ -421,7 +426,7 @@ def generate_common(inputs: BatchEncoding, generate_kwargs: dict[str,Any], seed:
         if seed is not None:
             # Constrain to 32-bits because of numpy
             set_seed(seed & 0xffff_ffff)
-        output = model.generate(**generate_kwargs, streamer=streamer)
+        output = model.generate(**generate_kwargs, generation_config=generation_config, streamer=streamer)
         end_ns = time.perf_counter_ns()
 
     # output tensor includes the prompt, so skip over it
