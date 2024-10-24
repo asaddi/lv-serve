@@ -406,7 +406,7 @@ def generate_common(inputs: BatchEncoding, generate_kwargs: dict[str,Any], seed:
     gen_len = generated_tokens.shape[-1]
 
     logger.info(f"Generation done. Prompt length = {prompt_len} tokens, generated token count = {gen_len}, total generation time = {gen_time:.2f} s")
-    logger.info(f"Average (prompt processing + generation) speed: {(prompt_len+gen_len) / gen_time:.1f} t/s")
+    logger.info(f"Average generation speed: {gen_len / gen_time:.1f} t/s")
 
     return generated_tokens
 
