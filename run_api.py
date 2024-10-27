@@ -539,12 +539,14 @@ async def get_models():
             logger.error("Model is not loaded.")
             raise HTTPException(status_code=500, detail="Model is not loaded.")
 
+        model_name = os.environ.get("MODEL_ALIAS", model_name_loaded)
+
         model_info = ModelInfo(
-            id=model_name_loaded,
+            id=model_name,
             created=model_loaded_time,
             owned_by="user",  # Adjust as needed
             permission=[],    # Can be populated with actual permissions if available
-            root=model_name_loaded,
+            root=model_name,
             parent=None
         )
 
@@ -600,6 +602,12 @@ def main():
         default=default_max_tokens,
         help="Default maximum number of tokens to generate."
     )
+    parser.add_argument(
+        "--alias",
+        type=str,
+        default=None,
+        help="Alternative model name to use in /v1/models endpoint."
+    )
 
     args = parser.parse_args()
 
@@ -608,6 +616,8 @@ def main():
     os.environ["LOAD_IN_4BIT"] = str(args.load_in_4bit)
     os.environ["LOAD_IN_8BIT"] = str(args.load_in_8bit)
     os.environ["MAX_TOKENS"] = str(args.max_tokens)
+    if args.alias:
+        os.environ["MODEL_ALIAS"] = args.alias
 
     # Run the app using Uvicorn with single worker and single thread
     uvicorn.run(
