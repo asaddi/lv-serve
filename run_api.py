@@ -201,7 +201,8 @@ async def setup_teardown(_: FastAPI):
             model_name,
             torch_dtype=dtype,
             device_map='auto',
-            quantization_config=quantization_config
+            quantization_config=quantization_config,
+            attn_implementation="sdpa",
         ).eval()
         logger.info("Model loaded.")
     except Exception as e:
