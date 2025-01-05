@@ -289,6 +289,7 @@ async def stream_tokens_sse(generator: Iterator[str], cancel_event: threading.Ev
             }
             logger.debug("Finished streaming tokens.")
             yield f"data: {json.dumps(finish_data)}\n\n"
+            yield f"data: [DONE]\n\n"
             break
 
         elif isinstance(text, queue.Empty):
